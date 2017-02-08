@@ -1,10 +1,21 @@
 import sys
 import struct
 import logging
+import types
+import curses
+import pickle
 
 registers = [0 for x in range(8)]
 stack = []
+memory = []
+instruction_set = {}
 
+mainwin = None
+regwin = None
+stackwin = None
+asmwin = None
+
+debug_mode = False
 
 def read_data(value):
     if value <= 0x7FFF:
@@ -17,157 +28,274 @@ def write_data(destination, value):
         logging.error('Invalid register number')
         sys.exit(0)
     registers[destination - 0x8000] = value % 0x8000
-    logging.info('Set register %d to %d' % (destination - 0x8000, value % 0x8000))
 
 
-def interpret(program, pc):
-    opcode = program[pc]
-    logging.info('Processing opcode %d at %d' % (opcode, pc))
-    pc += 1
+class Instruction():
+    def __init__(self, opcode, length, run, window):
+        self.opcode = opcode
+        self.length = length
+        self.run = types.MethodType(run, self)
+        self.mnemonic = self.run.__name__[1:]
+        self.window = window
 
-    # halt
-    if opcode == 0:
-        logging.info('Received opcode 0. Exiting')
-        sys.exit(1)
-    # set
-    elif opcode == 1:
-        logging.info('Received set with operands %d %d' % (program[pc], read_data(program[pc + 1])))
-        write_data(program[pc], read_data(program[pc + 1]))
-        pc += 2
-    # push
-    elif opcode == 2:
-        logging.info('Received push with operand %d' % read_data(program[pc]))
-        stack.append(read_data(program[pc]))
-        pc += 1
-    # pop
-    elif opcode == 3:
-        logging.info('Received pop with operand %d' % program[pc])
-        if not len(stack):
-            logging.error('Attempted to pop from empty stack. Exiting')
-            sys.exit(0)
-        write_data(program[pc], stack.pop())
-        pc += 1
-    # eq
-    elif opcode == 4:
-        logging.info('Received eq with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], 1 if read_data(program[pc + 1]) == read_data(program[pc + 2]) else 0)
-        pc += 3
-    # gt
-    elif opcode == 5:
-        logging.info('Received gt with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], 1 if read_data(program[pc + 1]) > read_data(program[pc + 2]) else 0)
-        pc += 3
-    # jmp
-    elif opcode == 6:
-        pc = read_data(program[pc])
-        logging.info('Jumping to %d' % pc)
-    # jt
-    elif opcode == 7:
-        logging.info('Received jump if not zero with operands %d %d' % (read_data(program[pc]), read_data(program[pc + 1])))
-        if read_data(program[pc]) != 0:
-            pc = read_data(program[pc + 1])
-            logging.info('Jumping to %d' % pc)
-        else:
-            pc += 2
-    # jz
-    elif opcode == 8:
-        logging.info('Received jump if zero with operands %d %d' % (read_data(program[pc]), read_data(program[pc + 1])))
-        if read_data(program[pc]) == 0:
-            pc = read_data(program[pc + 1])
-            logging.info('Jumping to %d' % pc)
-        else:
-            pc += 2
-    # add
-    elif opcode == 9:
-        logging.info('Received add with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], read_data(program[pc + 1]) + read_data(program[pc + 2]))
-        pc += 3
-    # mult
-    elif opcode == 10:
-        logging.info('Received mult with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], read_data(program[pc + 1]) * read_data(program[pc + 2]))
-        pc += 3
-    # mod
-    elif opcode == 11:
-        logging.info('Received mod with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], read_data(program[pc + 1]) % read_data(program[pc + 2]))
-        pc += 3
-    # and
-    elif opcode == 12:
-        logging.info('Received and with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], read_data(program[pc + 1]) & read_data(program[pc + 2]))
-        pc += 3
-    # or
-    elif opcode == 13:
-        logging.info('Received or with operands %d %d %d' % (program[pc], read_data(program[pc + 1]), read_data(program[pc + 2])))
-        write_data(program[pc], read_data(program[pc + 1]) | read_data(program[pc + 2]))
-        pc += 3
-    # not
-    elif opcode == 14:
-        logging.info('Received not with operands %d %d' % (program[pc], read_data(program[pc + 1])))
-        write_data(program[pc], ~read_data(program[pc + 1]))
-        pc += 2
-    # rmem
-    elif opcode == 15:
-        logging.info('Received rmem with operands %d %d' % (program[pc], read_data(program[pc + 1])))
-        write_data(program[pc], program[read_data(program[pc + 1])])
-        pc += 2
-    # wmem
-    elif opcode == 16:
-        logging.info('Received wmem with operands %d %d' % (read_data(program[pc]), read_data(program[pc + 1])))
-        program[read_data(program[pc])] = read_data(program[pc + 1])
-        pc += 2
-    # call
-    elif opcode == 17:
-        logging.info('Received call with operand %d' % read_data(program[pc]))
-        stack.append(pc + 1)
-        pc = read_data(program[pc])
-        logging.info('Jumping to %d' % pc)
-    # ret
-    elif opcode == 18:
-        logging.info('Received return')
-        if len(stack) == 0:
-            logging.error('Attempted to return with empty stack. Exiting')
-            sys.exit(0)
-        pc = stack.pop()
-        logging.info('Jumping to %d' % pc)
-    # out
-    elif opcode == 19:
-        logging.info('Printing %d' % read_data(program[pc]))
-        sys.stdout.write(chr(read_data(program[pc])))
-        pc += 1
-    # in
-    elif opcode == 20:
-        logging.info('Received in with operand %d' % program[pc])
-        write_data(program[pc], ord(sys.stdin.read(1)))
-        pc += 1
-    # nop
-    elif opcode == 21:
-        logging.info('Nop received. Passing')
-        pass
-    else:
-        logging.error('Unsupported opcode: %d. Exiting' % opcode)
-        sys.exit(0)
+    def string(self, program, pc):
+        rtn = self.mnemonic + ' '
+        rtn += ', '.join((str(program[pc + x]) if program[pc + x] <= 0x7FFF else 'R%d' % (program[pc + x] - 0x8000) for x in range(1, self.length + 1)))
+        return rtn
 
+
+def _halt(self, program, pc):
+    return -1
+
+
+def _set(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]))
+    return pc + 3
+
+
+def _push(self, program, pc):
+    stack.append(read_data(program[pc + 1]))
+    return pc + 2
+
+
+def _pop(self, program, pc):
+    write_data(program[pc + 1], stack.pop())
+    return pc + 2
+
+
+def _eq(self, program, pc):
+    write_data(program[pc + 1], 1 if read_data(program[pc + 2]) == read_data(program[pc + 3]) else 0)
+    return pc + 4
+
+
+def _gt(self, program, pc):
+    write_data(program[pc + 1], 1 if read_data(program[pc + 2]) > read_data(program[pc + 3]) else 0)
+    return pc + 4
+
+
+def _jmp(self, program, pc):
+    return read_data(program[pc + 1])
+
+
+def _jnz(self, program, pc):
+    return read_data(program[pc + 2]) if read_data(program[pc + 1]) != 0 else pc + 3
+
+
+def _jz(self, program, pc):
+    return read_data(program[pc + 2]) if read_data(program[pc + 1]) == 0 else pc + 3
+
+
+def _add(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]) + read_data(program[pc + 3]))
+    return pc + 4
+
+
+def _mult(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]) * read_data(program[pc + 3]))
+    return pc + 4
+
+
+def _mod(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]) % read_data(program[pc + 3]))
+    return pc + 4
+
+
+def _and(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]) & read_data(program[pc + 3]))
+    return pc + 4
+
+
+def _or(self, program, pc):
+    write_data(program[pc + 1], read_data(program[pc + 2]) | read_data(program[pc + 3]))
+    return pc + 4
+
+
+def _not(self, program, pc):
+    write_data(program[pc + 1], ~read_data(program[pc + 2]))
+    return pc + 3
+
+
+def _rmem(self, program, pc):
+    write_data(program[pc + 1], program[read_data(program[pc + 2])])
+    return pc + 3
+
+
+def _wmem(self, program, pc):
+    program[read_data(program[pc + 1])] = read_data(program[pc + 2])
+    return pc + 3
+
+
+def _call(self, program, pc):
+    stack.append(pc + 2)
+    return read_data(program[pc + 1])
+
+
+def _ret(self, program, pc):
+    return stack.pop()
+
+
+def _out(self, program, pc):
+    self.window.addstr(chr(read_data(program[pc + 1])))
+    self.window.refresh()
+    return pc + 2
+
+
+def _in(self, program, pc):
+    global debug_mode
+
+    show_state(memory, pc)
+    self.window.refresh()
+    char = self.window.getch()
+    if chr(char) == 'Q':
+        return -1
+    if chr(char) == 'D':
+        disassembly(program, 0, len(program))
+        return pc
+    if chr(char) == 'L':
+        return load_state()
+    if chr(char) == 'S':
+        save_state(program, pc)
+        return pc
+    if chr(char) == 'R':
+        debug_mode = True
+        char = 10
+    write_data(program[pc + 1], char)
+    return pc + 2
+
+
+def _nop(self, program, pc):
+    return pc + 1
+
+
+def save_state(program, pc):
+    global registers, stack
+    with open('savestate.pickle', 'wb') as f:
+        pickle.dump(registers, f)
+        pickle.dump(stack, f)
+        pickle.dump(pc, f)
+        pickle.dump(program, f)
+
+
+def load_state():
+    global registers, stack, memory
+    with open('savestate.pickle', 'rb') as f:
+        registers = pickle.load(f)
+        stack = pickle.load(f)
+        pc = pickle.load(f)
+        memory = pickle.load(f)
     return pc
 
 
-def run(program):
-    pc = 0
-    exit = False
+def disassembly(program, pc, length):
+    current_length = 0
+    with open('dump.txt', 'w') as f:
+        while current_length < length:
+            opcode = program[pc]
+            if opcode in instruction_set:
+                f.write('%d:: %s\n' % (pc, instruction_set[opcode].string(program, pc)))
+                pc += instruction_set[opcode].length + 1
+                current_length += instruction_set[opcode].length + 1
+            else:
+                f.write('%d:: %d\n' % (pc, program[pc]))
+                pc += 1
+                current_length += 1
 
-    while not exit:
-        pc = interpret(program, pc)
 
-if __name__ == '__main__':
-    logging.basicConfig(filename='interpreter.log', level=logging.WARNING)
+def show_state(program, pc):
+    stackwin.clear()
+    for i in reversed(range(len(stack))):
+        stackwin.addstr(len(stack) - i - 1, 0, 'S%03d:: %05d 0x%05X' % (i, stack[i], stack[i]))
+    stackwin.noutrefresh()
+
+    for i in range(len(registers)):
+        regwin.addstr(i, 0, 'R%d:: %05d 0x%05X' % (i, registers[i], registers[i]))
+    regwin.noutrefresh()
+
+    asmwin.clear()
+    current_pc = pc
+    pc -= 40
+    current_length = 0
+    while current_length < 80:
+        opcode = program[pc]
+        if opcode in instruction_set:
+            asmwin.addstr('%d:: %s\n' % (pc, instruction_set[opcode].string(program, pc)), curses.A_BOLD if pc == current_pc else curses.A_NORMAL)
+            pc += instruction_set[opcode].length + 1
+            current_length += instruction_set[opcode].length + 1
+        else:
+            asmwin.addstr('%d:: %d\n' % (pc, program[pc]))
+            pc += 1
+            current_length += 1
+        asmwin.noutrefresh()
+
+
+def main(stdscr):
+    global memory, instruction_set, mainwin, regwin, stackwin, asmwin, debug_mode
 
     if len(sys.argv) != 2:
         logging.error('Incorrect call. Bailing out')
         sys.exit(0)
 
-    with open(sys.argv[1], 'rb') as f:
-        memory = [x[0] for x in struct.iter_unpack('<H', f.read())]
-    memory.extend([0 for x in range(0x8000 - len(memory))])
+    curses.curs_set(1)
+    curses.echo()
 
-    run(memory)
+    mainwin = curses.newwin(50, 79, 0, 0)
+    mainwin.scrollok(1)
+    regwin = curses.newwin(9, 30, 0, 80)
+    stackwin = curses.newwin(50, 20, 0, 110)
+    asmwin = curses.newwin(40, 30, 9, 80)
+    asmwin.scrollok(1)
+    logging.basicConfig(filename='interpreter.log', level=logging.WARNING)
+
+    if sys.argv[1] == '-s':
+        pc = load_state()
+    else:
+        with open(sys.argv[1], 'rb') as f:
+            memory = [x[0] for x in struct.iter_unpack('<H', f.read())]
+        memory.extend([0 for x in range(0x8000 - len(memory))])
+        pc = 0
+
+    instruction_set = {
+        0: Instruction(0, 0, _halt, mainwin),
+        1: Instruction(1, 2, _set, mainwin),
+        2: Instruction(2, 1, _push, mainwin),
+        3: Instruction(3, 1, _pop, mainwin),
+        4: Instruction(4, 3, _eq, mainwin),
+        5: Instruction(5, 3, _gt, mainwin),
+        6: Instruction(6, 1, _jmp, mainwin),
+        7: Instruction(7, 2, _jnz, mainwin),
+        8: Instruction(8, 2, _jz, mainwin),
+        9: Instruction(9, 3, _add, mainwin),
+        10: Instruction(10, 3, _mult, mainwin),
+        11: Instruction(11, 3, _mod, mainwin),
+        12: Instruction(12, 3, _and, mainwin),
+        13: Instruction(13, 3, _or, mainwin),
+        14: Instruction(14, 2, _not, mainwin),
+        15: Instruction(15, 2, _rmem, mainwin),
+        16: Instruction(16, 2, _wmem, mainwin),
+        17: Instruction(17, 1, _call, mainwin),
+        18: Instruction(18, 0, _ret, mainwin),
+        19: Instruction(19, 1, _out, mainwin),
+        20: Instruction(20, 1, _in, mainwin),
+        21: Instruction(21, 0, _nop, mainwin),
+    }
+
+    while pc >= 0:
+        opcode = memory[pc]
+        try:
+            if opcode in instruction_set:
+                if debug_mode:
+                    show_state(memory, pc)
+                    mainwin.refresh()
+                    char = mainwin.getch()
+                    if chr(char) in ('c', 'C'):
+                        debug_mode = False
+                pc = instruction_set[opcode].run(memory, pc)
+            else:
+                logging.error('Unsupported opcode: %d. Exiting' % opcode)
+                return
+        except IndexError:
+            logging.error('Attempted to return or pop with empty stack. Exiting')
+            return
+
+if __name__ == '__main__':
+    curses.wrapper(main)
